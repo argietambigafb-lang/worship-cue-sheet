@@ -328,12 +328,21 @@ textarea { min-height:180px; }
 .bpmbox.bpm-typed-only{display:flex;justify-content:center;align-items:center;gap:0}
 .bpmbox.bpm-typed-only .bpmv{min-width:92px;text-align:center}
 .bpmbox.bpm-typed-only .bpmv input{width:88px;font-size:26px;padding:5px 4px}
+
+.room-button{height:36px;padding:0 10px;font-size:12px;flex:none}
+.room-panel{position:fixed;z-index:1000;inset:0;background:rgba(4,12,20,.55);display:flex;align-items:flex-end;justify-content:center;padding:12px}
+.room-card{width:min(100%,500px);max-height:88dvh;overflow:auto;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 16px 50px #0003}
+.room-card h2{margin:0 0 6px;font:800 24px var(--f-display)}.room-card p{color:var(--muted);font-size:13px;margin:0 0 14px}
+.room-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:12px 0}.room-code{font:700 24px var(--f-mono);letter-spacing:.12em;text-align:center;padding:12px;background:var(--soft);border-radius:12px;margin:10px 0}
+.room-note{font-size:12px;color:var(--muted);padding:8px 0}.room-line{display:flex;gap:8px}.room-line>*{flex:1;min-width:0}
+@media(min-width:560px){.room-panel{align-items:center}}
 </style>
 
 <div class="app" id="app"></div>
 <input id="backup-file" type="file" accept="application/json,.json" hidden><div id="overlay" hidden></div>
 <div id="toast" role="status" aria-live="polite"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 /* ---------- Music theory: chords, transpose, parsing ---------- */
 const NOTES_SHARP=['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
@@ -551,7 +560,7 @@ function load(){
   d.sets.forEach(s=>{s.items=(s.items||[]).filter(i=>d.songs.some(x=>x.id===i.songId));});
   return d;
 }
-function save(){if(U.view==='play')return true;try{localStorage.setItem(STORE,JSON.stringify(S));return true;}catch(e){toast('Could not save. Storage may be full or blocked.');return false;}}
+function save(){if(U.view==='play')return true;try{localStorage.setItem(STORE,JSON.stringify(S));if(typeof roomPublishState==='function')roomPublishState();return true;}catch(e){toast('Could not save. Storage may be full or blocked.');return false;}}
 let S=load();
 const U={view:'songs',q:'',play:null,from:'songs',editId:null,editFrom:'songs',playSnapshot:null,audioSnapshot:null,confirmAction:null};
 
@@ -828,8 +837,12 @@ function render(){
   else if(U.view==='edit'){U.conv=null;app.innerHTML=editView();updatePreview();}
   else if(U.view==='play'){app.innerHTML=playView();refreshPlay();updateMetroUI();}
   app.classList.toggle('stage-mode',U.view==='play'&&!!U.stage);
+  const top=app.querySelector('.top');
+  if(top&&!top.querySelector('[data-room-action="open"]')){
+    const b=document.createElement('button');b.className='btn room-button';b.type='button';b.dataset.roomAction='open';b.textContent='Share / Live';top.appendChild(b);
+  }
 }
-function enterPlay(play,from){U.play=play;U.from=from;U.playSnapshot=cloneData(S);U.audioSnapshot={...AUDIO_PREFS};U.view='play';render();wake();updateSaveButton();}
+function enterPlay(play,from){U.play=play;U.from=from;U.playSnapshot=cloneData(S);U.audioSnapshot={...AUDIO_PREFS};U.view='play';render();wake();updateSaveButton();roomPublishState();}
 
 /* ---------- Key sheet ---------- */
 function keyNames(){const p=S.prefs.acc;return p==='sharp'?NOTES_SHARP:p==='flat'?NOTES_FLAT:['C','Db','D','Eb','E','F','F#','G','Ab','A','Bb','B'];}
@@ -979,7 +992,7 @@ function step(d){
   const n=U.play.idx+d;
   if(n<0||n>=x.set.items.length)return;
   U.play.idx=n;
-  render();
+  render();roomPublishState();
   if(S.prefs.auto)metroStart();
 }
 function bump(d){if(mRunning)return;const x=ctxItem();if(!x)return;setBpm(x,getBpm(x)+d);const v=$('#bpmv');if(v)v.textContent=getBpm(x);}
@@ -1258,3 +1271,88 @@ loadAudioPrefs();
 window.addEventListener('beforeunload',e=>{if(audioPrefsDirty()){e.preventDefault();e.returnValue='';}});
 render();
 </script>
+
+<script>
+/* ---------- Supabase Shared Room / Live Mode ----------
+   Uses the room RPCs and live_state table configured in the Supabase project. */
+const ROOM_CONFIG={url:'https://eclamzaupcdoibkqrpui.supabase.co',key:'sb_publishable_3umxWBDHhi_3PoTXdJnRqQ_XgMlm046'};
+const ROOM={client:null,roomId:null,roomCode:null,role:null,channel:null,userId:null,applyingRemote:false,publishTimer:null};
+function roomToast(msg){if(typeof toast==='function')toast(msg);else alert(msg);}
+function roomModal(force){
+  let el=document.getElementById('room-panel');if(el){el.remove();if(!force)return;}
+  el=document.createElement('div');el.id='room-panel';el.className='room-panel';
+  const code=ROOM.roomCode?'<div class="room-code">'+esc(ROOM.roomCode)+'</div>':'';
+  const state=ROOM.roomId?('<p>Connected as <b>'+esc(ROOM.role||'member')+'</b>. Room code: <b>'+esc(ROOM.roomCode||'—')+'</b></p>'+code+'<div class="room-actions"><button class="btn" data-room-action="copy">Copy code</button><button class="btn danger" data-room-action="leave">Leave room</button></div><p>Shared room sync is active while this page is open. The leader controls the live song and setlist.</p>'):
+  ('<p>Create a room as leader, or join an existing room using its six-digit code. Each participant uses this website on their own device.</p><label for="room-code-input">Room code</label><input id="room-code-input" inputmode="numeric" maxlength="6" placeholder="6-digit code"><div class="room-actions"><button class="btn primary" data-room-action="create">Create room</button><button class="btn" data-room-action="join">Join room</button></div>');
+  el.innerHTML='<div class="room-card" role="dialog" aria-modal="true" aria-label="Shared Room"><div class="top"><div class="grow"><h2>Shared Room</h2><p>Worship Cue Sheet · Live Mode</p></div><button class="ib" data-room-action="close" aria-label="Close">×</button></div>'+state+'<div class="room-note" id="room-status">'+(ROOM.roomId?'Connected.':'Supabase connection will start when you create or join a room.')+'</div></div>';
+  el.addEventListener('click',roomAction);document.body.appendChild(el);
+}
+async function roomConnect(){
+  if(!window.supabase||!window.supabase.createClient)throw new Error('Supabase library did not load. Check your internet connection.');
+  if(!ROOM.client)ROOM.client=window.supabase.createClient(ROOM_CONFIG.url,ROOM_CONFIG.key,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:false}});
+  const {data,error}=await ROOM.client.auth.getSession();if(error)throw error;
+  if(!data.session){const r=await ROOM.client.auth.signInAnonymously();if(r.error)throw r.error;}
+  const u=await ROOM.client.auth.getUser();if(u.error)throw u.error;ROOM.userId=u.data.user.id;
+}
+function roomStatus(msg){const n=document.getElementById('room-status');if(n)n.textContent=msg;}
+async function roomCreate(){
+  await roomConnect();const {data,error}=await ROOM.client.rpc('create_worship_room');if(error)throw error;
+  const row=Array.isArray(data)?data[0]:data;if(!row)throw new Error('Room was created but no room details were returned.');
+  ROOM.roomId=row.room_id;ROOM.roomCode=row.room_code;ROOM.role='leader';await roomSubscribe();roomModal(true);roomToast('Room created. Share code '+ROOM.roomCode);roomPublishState(true);
+}
+async function roomJoin(){
+  await roomConnect();const inp=document.getElementById('room-code-input');const code=(inp?inp.value:'').trim();if(!/^\d{6}$/.test(code))throw new Error('Enter the six-digit room code.');
+  const {data,error}=await ROOM.client.rpc('join_worship_room',{p_room_code:code});if(error)throw error;
+  const row=Array.isArray(data)?data[0]:data;if(!row)throw new Error('Room join did not return room details.');
+  ROOM.roomId=row.room_id;ROOM.roomCode=code.toUpperCase();ROOM.role=row.member_role||'viewer';await roomSubscribe();
+  const {data:live,error:le}=await ROOM.client.from('live_state').select('*').eq('room_id',ROOM.roomId).maybeSingle();if(le)throw le;if(live)roomApplyState(live);
+  roomModal(true);roomToast('Joined shared room as '+ROOM.role+'.');
+}
+async function roomSubscribe(){
+  if(ROOM.channel){await ROOM.client.removeChannel(ROOM.channel);ROOM.channel=null;}
+  ROOM.channel=ROOM.client.channel('wcs-room-'+ROOM.roomId).on('postgres_changes',{event:'UPDATE',schema:'public',table:'live_state',filter:'room_id=eq.'+ROOM.roomId},payload=>{if(!ROOM.applyingRemote)roomApplyState(payload.new);}).subscribe(status=>{if(status==='SUBSCRIBED')roomStatus('Realtime connected.');else if(status==='CHANNEL_ERROR')roomStatus('Realtime connection error. Check Supabase Realtime settings.');});
+}
+function roomCurrentPayload(){
+  const x=typeof ctxItem==='function'?ctxItem():null;
+  return {version:1,app:'Worship Cue Sheet',songs:S.songs,sets:S.sets,activeSet:S.activeSet,play:U.view==='play'&&U.play?{...U.play,from:U.from}:null,view:U.view,currentSong:x?{id:x.song.id,title:x.song.title,artist:x.song.artist,key:x.song.key,bpm:getBpm(x),timeSignature:x.song.ts}:null};
+}
+async function roomPublishState(force){
+  if(!ROOM.client||!ROOM.roomId||ROOM.role!=='leader'||ROOM.applyingRemote)return;
+  clearTimeout(ROOM.publishTimer);
+  const run=async()=>{try{
+    const p=roomCurrentPayload(),x=p.currentSong;
+    const {error}=await ROOM.client.rpc('update_worship_live_state',{p_room_id:ROOM.roomId,p_current_song_id:'WCS1:'+JSON.stringify(p),p_current_song_title:x?x.title:'No song selected',p_current_section:p.play?'Playing':'Ready',p_current_setlist_index:p.play&&Number.isInteger(p.play.idx)?p.play.idx:0});
+    if(error)throw error;
+  }catch(e){console.error('Room sync failed',e);roomStatus('Sync error: '+e.message);}};
+  if(force)await run();else ROOM.publishTimer=setTimeout(run,180);
+}
+function roomApplyState(row){
+  if(!row||!row.current_song_id||!row.current_song_id.startsWith('WCS1:')){roomStatus('Connected. Waiting for the leader to share the setlist.');return;}
+  try{
+    const p=JSON.parse(row.current_song_id.slice(5));if(p.version!==1||!Array.isArray(p.songs)||!Array.isArray(p.sets))return;
+    ROOM.applyingRemote=true;
+    S.songs=p.songs;S.sets=p.sets;S.activeSet=p.activeSet|| (p.sets[0]&&p.sets[0].id)||null;
+    try{localStorage.setItem(STORE,JSON.stringify(S));}catch(e){}
+    if(ROOM.role!=='leader'&&p.play&&p.play.setId&&S.sets.some(s=>s.id===p.play.setId)){
+      U.play={setId:p.play.setId,idx:Math.max(0,Math.min(p.play.idx||0,S.sets.find(s=>s.id===p.play.setId).items.length-1))};U.from='sets';U.view='play';
+    }
+    render();roomStatus('Live state synced · '+(row.current_song_title||'Ready'));
+  }catch(e){console.error('Could not apply shared state',e);roomStatus('Could not read the shared state.');}
+  finally{ROOM.applyingRemote=false;}
+}
+async function roomLeave(){if(ROOM.channel&&ROOM.client)await ROOM.client.removeChannel(ROOM.channel);ROOM.channel=null;ROOM.roomId=null;ROOM.roomCode=null;ROOM.role=null;roomModal(true);}
+async function roomAction(e){
+  const b=e.target.closest('[data-room-action]');if(!b)return;const a=b.dataset.roomAction;
+  try{
+    if(a==='close'){document.getElementById('room-panel')?.remove();return;}
+    if(a==='open'){roomModal();return;}
+    if(a==='create'){b.disabled=true;roomStatus('Creating room…');await roomCreate();return;}
+    if(a==='join'){b.disabled=true;roomStatus('Joining room…');await roomJoin();return;}
+    if(a==='copy'){await navigator.clipboard.writeText(ROOM.roomCode||'');roomToast('Room code copied.');return;}
+    if(a==='leave'){if(confirm('Leave this shared room on this device?'))await roomLeave();return;}
+  }catch(err){console.error(err);roomStatus(err.message||'Something went wrong.');roomToast(err.message||'Shared room error');}
+  finally{if(b.isConnected)b.disabled=false;}
+}
+document.addEventListener('click',e=>{const b=e.target.closest('[data-room-action="open"]');if(b){e.preventDefault();roomModal();}});
+</script>
+
